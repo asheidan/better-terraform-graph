@@ -9,6 +9,8 @@ import os.path
 from typing import Dict
 from typing import Optional
 
+# TODO: Fix issue with removed 'data.' in modules
+
 
 label_re = re.compile(r'label = "(.*)\.([^."]*)"')
 label_format = ('label=<'
@@ -22,6 +24,8 @@ label_format = ('label=<'
 unwanted_patterns = (
     re.compile(r'^.* -> "\[[^]]*\] provider\.aws'),  # aws_provider_link
     re.compile(r'^.* -> "\[[^]]*\] var\.default_tags'),  # default_tags_link
+    #re.compile(r'^.* -> "\[[^]]*\] (module\.[^.]*\.)*var\.tags'),  # default_tags_link
+    re.compile(r'.*var\.tags.*'),  # default_tags_link
 
     re.compile(r'^.*] provider\.aws \(close\)'),
     re.compile(r'^.*] meta\.count-boundary \(EachMode fixup\)'),
@@ -68,6 +72,40 @@ class Node:
 
 class Resource(Node):
 
+    colors = {
+        'iam_role_policy_attachment': 'orange1',
+        'iam_policy_document': 'orange1',
+        'iam_policy': 'orange2',
+        'iam_role_policy': 'orange2',
+        'sqs_queue_policy': 'orange2',
+        'iam_role': 'orange3',
+        'security_group': 'orange4',
+        's3_bucket_public_access_block': 'orange2',
+
+        'route': 'green1',
+        'route_table': 'green2',
+        'vpc': 'green4',
+        'vpc_endpoint': 'green2',
+        'internet_gateway': 'green2',
+        'subnet': 'green3',
+        'elasticache_subnet_group': 'green3',
+
+        'ecs_service': 'blue1',
+        'ecs_task_definition': 'blue2',
+        'ecs_cluster': 'blue4',
+        'ecr_repository': 'blue4',
+        'instance': 'blue4',
+        'lambda_function': 'blue2',
+
+        's3_bucket': 'red1',
+        'elasticache_replication_group': 'red2',
+        'dynamodb_table': 'red3',
+
+        'cloudwatch_log_group': 'purple1',
+        'cloudwatch_event_target': 'purple1',
+        'cloudwatch_event_rule': 'purple1',
+    }
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -82,6 +120,9 @@ class Resource(Node):
         if len(label_parts) == 4:
             self.module_name = label_parts[1]
 
+    def color(self, resource_name):
+        return self.colors.get(resource_name, 'gray40')
+
     @property
     def label_formatted(self):
         type_indicator = '<font color="gray60" point-size="9">data.</font>' if self.is_data else ''
@@ -89,7 +130,7 @@ class Resource(Node):
                 '<table border="0">'
                 '<tr><td>'
                 f'{type_indicator}'
-                f'<font color="gray40" point-size="9">{self.resource}</font>'
+                f'<font color="{self.color(self.resource)}" point-size="9">{self.resource}</font>'
                 '</td></tr>'
                 f'<tr><td>{self.key}</td></tr>'
                 '</table>>')
@@ -138,7 +179,7 @@ class Edge:
 
 class Graph:
 
-    module_line = re.compile(r'"\[root\] module\.(?P<module_name>[^.]*)\.(?P<name>[^"]*)" \[(?P<attributes>[^]]*)\]')
+    module_line = re.compile(r'"\[root\] (?P<module_name>(module\.[^.]*\.)+)(?P<name>[^"]*)" \[(?P<attributes>[^]]*)\]')
 
     NODE_CLASSES = [
         Resource,
@@ -146,8 +187,9 @@ class Graph:
         Provider,
         Output,
     ]
-    def __init__(self, name: str):
+    def __init__(self, name: str, label: Optional[str] = None):
         self.name = name
+        self.label = label
 
         self.nodes = []
         self.edges = []
@@ -178,16 +220,22 @@ class Graph:
                 continue
 
             node = None
-            module = None
+            module = graph
 
             match = cls.module_line.fullmatch(line)
             if match:
-                module_name = match['module_name']
-                if module_name in graph.modules:
-                    module = graph.modules[module_name]
-                else:
-                    module = Graph(name=graph.name + "-" + module_name)
-                    graph.modules[module_name] = module
+                module_path = match['module_name']
+
+                # Remove leading 'module.' and trailing '.'
+                module_names = list(filter(None, module_path[7:-1].split(".module.")))
+                #print(module_names, list(module.modules.keys()))
+
+                for sub_module_name in module_names:
+                    if sub_module_name in module.modules:
+                        module = module.modules[sub_module_name]
+                    else:
+                        module.modules[sub_module_name] = Graph(name=graph.name + ":" + sub_module_name, label=sub_module_name)
+                        module = module.modules[sub_module_name]
 
             for node_class in [Variable, Resource]:
                 match = node_class.valid_line(line)
@@ -197,19 +245,17 @@ class Graph:
 
 
             if node:
-                if module:
-                    module.nodes.append(node)
-                else:
-                    graph.nodes.append(node)
+                module.nodes.append(node)
 
         return graph
 
         #map(split_label, map(remove_aws, filter(wanted_line, filecontent[4:-2]))),
 
     def __str__(self):
+        label = self.label or self.name
         return "\n".join([
             f'subgraph "cluster_{self.name}" {{',
-            f'\tlabel = "{self.name}";',
+            f'\tlabel = "{label}";',
             '',
             '\t' + '\n\t'.join(map(str, self.modules.values())),
             '',
@@ -257,7 +303,7 @@ def main() -> None:
 
     print('digraph root {\n'
           '\tcompound = "true";\n'
-          #'\tnewrank = "true";\n'
+          '\tnewrank = "true";\n'
           '\tsplines = "true";\n'
           '\tgraph[style = solid, fontname = "helvetica", fontsize = 12, rankdir = "LR"]\n',
           '\tedge[arrowsize = 0.6];\n'
